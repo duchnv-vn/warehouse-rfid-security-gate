@@ -3,9 +3,14 @@
 #include "RfidTag.h"
 #include "Lcd1602I2c.h"
 #include "InterBoardSerialBus.h"
+#include "ControlButton.h"
+#include "LightTower.h"
 
 SoftwareSerial link{4, 5};
 InterBoardSerialBus bus{link};
+
+byte RESET_BUTTON_DI_PIN = 3;
+byte resetDataTriggerCount = 0;
 
 constexpr unsigned long SERIAL_BAUD = 9600;
 constexpr byte MAX_TAGS = 20;
@@ -14,17 +19,35 @@ const char *direction = directions[2];
 InterBoardSerialBus::TagUid tags[MAX_TAGS] = {};
 byte tagCount = 0;
 
+byte scanStatus = InterBoardSerialBus::STOP_SCAN;
+
 Lcd1602I2c lcd{0x27, 16, 2};
+
+auto lightTower = new LightTower{6};
+
+void resetData() {
+    direction = directions[2];
+    tagCount = 0;
+    memset(tags, 0, sizeof(tags));
+}
+
+void renderResetDataRow() {
+    lcd.writeLineAligned(0, "RESET DATA", Lcd1602I2c::LineAlign::CENTER);
+    lcd.writeLineAligned(1, "", Lcd1602I2c::LineAlign::LEFT);
+}
 
 void renderStopScanRow() {
     lcd.writeLineAligned(0, "STOP SCAN", Lcd1602I2c::LineAlign::CENTER);
     lcd.writeLineAligned(1, "", Lcd1602I2c::LineAlign::LEFT);
 }
 
-void renderStartScanRow(const byte currentTagCount) {
+void renderStartScanRow(const bool clear2ndRow = false) {
     char line[17] = {0};
-    snprintf(line, sizeof(line), "SCAN TAGS:%u", currentTagCount);
+    snprintf(line, sizeof(line), "SCAN TAGS:%u", tagCount);
     lcd.writeLineAligned(0, line, Lcd1602I2c::LineAlign::CENTER);
+    if (clear2ndRow) {
+        lcd.writeLineAligned(1, "", Lcd1602I2c::LineAlign::LEFT);
+    }
 }
 
 void renderFinishScanRow() {
@@ -37,6 +60,12 @@ void renderFinishScanRow() {
 void renderUID(const char *uidHex) {
     lcd.writeLineAligned(1, uidHex, Lcd1602I2c::LineAlign::CENTER);
 }
+
+void onNewResetButtonTrigger() {
+    resetDataTriggerCount++;
+}
+
+auto resetButton = new ControlButton{RESET_BUTTON_DI_PIN, INPUT_PULLUP, onNewResetButtonTrigger};
 
 bool isUIDDuplicate(const InterBoardSerialBus::TagUid &newTag) {
     if (newTag.uidSize > RfidTag::MAX_UID_SIZE) return false;
@@ -55,8 +84,8 @@ void onNewTransaction() {
     Serial.println(direction);
     Serial.print(F("Tag count: "));
     Serial.println(tagCount);
-    tagCount = 0;
-    memset(tags, 0, sizeof(tags));
+    resetData();
+    lightTower->setState(false);
 }
 
 const char *directionCodeToText(const byte directionCode) {
@@ -108,7 +137,7 @@ void onReceiveNewTag(const byte, const byte *payload, const byte payloadLength) 
     if (tagCount < MAX_TAGS and !isUIDDuplicate(receivedTag)) {
         tags[tagCount++] = receivedTag;
         renderUID(uidHex);
-        renderStartScanRow(tagCount);
+        renderStartScanRow();
     }
 }
 
@@ -120,10 +149,30 @@ void onReceiveNewScanningStatus(const byte, const byte *payload, const byte payl
         return;
     }
 
+    scanStatus = receivedScanningStatus;
+
     if (receivedScanningStatus == InterBoardSerialBus::START_SCAN) {
-        renderStartScanRow(tagCount);
+        renderStartScanRow();
+        lightTower->setState(true);
     } else {
+        resetData();
         renderStopScanRow();
+        lightTower->setState(false);
+    }
+}
+
+void checkResetData() {
+    if (resetDataTriggerCount >= 2) {
+        resetDataTriggerCount = 0;
+        renderResetDataRow();
+        resetData();
+        delay(1000);
+
+        if (scanStatus == InterBoardSerialBus::START_SCAN) {
+            renderStartScanRow(true);
+        } else {
+            renderStopScanRow();
+        }
     }
 }
 
@@ -134,6 +183,8 @@ void setup() {
     bus.on(InterBoardSerialBus::MSG_NEW_DIRECTION, onReceiveNewDirection);
     bus.on(InterBoardSerialBus::MSG_NEW_TAG, onReceiveNewTag);
     bus.on(InterBoardSerialBus::NSG_NEW_SCAN_STATUS, onReceiveNewScanningStatus);
+
+    resetButton->subscribeChangeEvent();
 
     lcd.begin();
     lcd.writeLineAligned(0, "RFID GATE", Lcd1602I2c::LineAlign::CENTER);
@@ -146,4 +197,5 @@ void setup() {
 
 void loop() {
     bus.poll();
+    checkResetData();
 }
