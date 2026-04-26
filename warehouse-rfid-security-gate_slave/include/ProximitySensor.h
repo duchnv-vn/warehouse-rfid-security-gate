@@ -4,15 +4,15 @@
 
 class ProximitySensor {
     byte _pin;
-    byte _readMode = 0x01;
-    byte _activeLogic = INPUT;
+    byte _readMode = INPUT;
+    byte _activeLogic = HIGH;
+
+    void setPinMode();
 
 public:
     ProximitySensor(const byte pin, const byte readMode): _pin{pin}, _readMode{readMode} {
         setPinMode();
     }
-
-    void setPinMode();
 
     bool getNewState() const;
 

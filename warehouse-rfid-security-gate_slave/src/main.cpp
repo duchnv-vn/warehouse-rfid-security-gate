@@ -9,8 +9,10 @@ SoftwareSerial link{4, 5};
 InterBoardSerialBus bus{link};
 
 constexpr unsigned long SERIAL_BAUD = 9600;
-constexpr byte SENSOR_COUNT = 2;
+constexpr unsigned int NO_TAG_CHECK_DIRECTION_EXPIRATION = 5000;
+constexpr unsigned int HAS_TAG_CHECK_DIRECTION_EXPIRATION = 10000;
 
+constexpr byte SENSOR_COUNT = 2;
 byte PROXIMITY_SENSOR_DI_PINS[SENSOR_COUNT] = {2, 3};
 ProximitySensor *sensorInstances[SENSOR_COUNT] = {
     new ProximitySensor{PROXIMITY_SENSOR_DI_PINS[0], INPUT_PULLUP},
@@ -27,7 +29,8 @@ byte tagCount = 0;
 
 bool shouldReadUID = true;
 bool shouldReadUM = false;
-bool shouldRead = true;
+bool shouldRead = false;
+unsigned long startScanTimestamp = 0;
 
 byte getDirectionCode() {
     if (direction == directions[0]) {
@@ -46,18 +49,27 @@ byte getScanningStatusCode(const bool isScanning) {
     return InterBoardSerialBus::STOP_SCAN;
 }
 
+void resetState() {
+    shouldRead = false;
+    pinTriggers[0] = false;
+    pinTriggers[1] = false;
+    direction = directions[2];
+    tagCount = 0;
+}
+
+
 void startReadTag() {
     if (shouldRead) return;
     shouldRead = true;
+    startScanTimestamp = millis();
     bus.sendNewScanningStatus(getScanningStatusCode(shouldRead));
-    Serial.println(F("Start scanning"));
 }
 
-void stopReadTag() {
-    if (!shouldRead) return;
+void stopReadTag(const bool shouldSendNewScanningStatus = false) {
     shouldRead = false;
-    bus.sendNewScanningStatus(getScanningStatusCode(shouldRead));
-    Serial.println(F("Stop scanning"));
+    if (shouldSendNewScanningStatus) {
+        bus.sendNewScanningStatus(getScanningStatusCode(shouldRead));
+    }
 }
 
 void checkDirection(const byte pinIdx, const bool state) {
@@ -69,12 +81,9 @@ void checkDirection(const byte pinIdx, const bool state) {
     if (allTriggered) {
         stopReadTag();
         direction = directions[pinIdx];
-        pinTriggers[0] = false;
-        pinTriggers[1] = false;
         bus.sendNewDirection(getDirectionCode());
-        Serial.print(F("D: "));
-        Serial.println(direction);
-        direction = directions[2];
+        resetState();
+        delay(3000);
         return;
     }
 
@@ -107,25 +116,7 @@ bool attachSensorInterrupt(const byte pin) {
     return false;
 }
 
-void setup() {
-    Serial.begin(SERIAL_BAUD);
-
-    link.begin(9600); // board-to-board serial
-
-    attachSensorInterrupt(PROXIMITY_SENSOR_DI_PINS[0]);
-    attachSensorInterrupt(PROXIMITY_SENSOR_DI_PINS[1]);
-
-    rfidBoard = new RfidRc522Board{};
-
-    pinTriggers[0] = false;
-    pinTriggers[1] = false;
-    shouldRead = false;
-    bus.sendNewScanningStatus(getScanningStatusCode(shouldRead));
-}
-
-void loop() {
-    bus.poll();
-
+void readTag() {
     if (shouldRead) {
         byte uid[10] = {0};
         byte uidSize = 0;
@@ -134,6 +125,8 @@ void loop() {
         if (!tagPresent) {
             return;
         }
+
+        startScanTimestamp = millis();
 
         RfidTag newTag{};
 
@@ -157,8 +150,34 @@ void loop() {
         }
 
         ++tagCount;
-        Serial.print(F("T: "));
-        Serial.println(tagCount);
         bus.sendNewTag(newTag);
     }
+}
+
+void checkStopScan() {
+    if (shouldRead && (millis() - startScanTimestamp >= (tagCount > 0
+                                                             ? HAS_TAG_CHECK_DIRECTION_EXPIRATION
+                                                             : NO_TAG_CHECK_DIRECTION_EXPIRATION))) {
+        resetState();
+        bus.sendNewScanningStatus(getScanningStatusCode(shouldRead));
+    }
+}
+
+void setup() {
+    Serial.begin(SERIAL_BAUD);
+
+    link.begin(9600); // board-to-board serial
+
+    attachSensorInterrupt(PROXIMITY_SENSOR_DI_PINS[0]);
+    attachSensorInterrupt(PROXIMITY_SENSOR_DI_PINS[1]);
+
+    rfidBoard = new RfidRc522Board{};
+
+    resetState();
+    bus.sendNewScanningStatus(getScanningStatusCode(shouldRead));
+}
+
+void loop() {
+    readTag();
+    checkStopScan();
 }
